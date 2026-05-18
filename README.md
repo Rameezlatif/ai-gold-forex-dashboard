@@ -43,4 +43,4 @@ TRADING_ECONOMICS_CLIENT = "your_client"
 TRADING_ECONOMICS_KEY = "your_key"
 ```
 
-If no credentials are configured, the app can block virtual trades when `Block if News Unavailable` is enabled.
+If no credentials are configured, the app can block virtual trades when `Block if News Unavailable` is enabled. By default, that setting is off so paper-trading tests can continue without calendar credentials.

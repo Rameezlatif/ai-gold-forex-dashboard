@@ -69,7 +69,7 @@ trade_reference_levels = st.sidebar.toggle("Trade HOLD References", value=True)
 require_volume_confirmation = st.sidebar.toggle("Require Volume Confirmation", value=False)
 volume_spike_threshold = st.sidebar.slider("Volume Spike Threshold", 1.0, 3.0, 1.2, 0.1)
 avoid_high_impact_news = st.sidebar.toggle("Avoid High Impact News", value=True)
-block_if_news_unavailable = st.sidebar.toggle("Block if News Unavailable", value=True)
+block_if_news_unavailable = st.sidebar.toggle("Block if News Unavailable", value=False)
 news_minutes_before = st.sidebar.slider("Minutes Before News", 15, 180, 60, 15)
 news_minutes_after = st.sidebar.slider("Minutes After News", 15, 180, 30, 15)
 
