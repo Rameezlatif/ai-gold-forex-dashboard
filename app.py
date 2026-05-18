@@ -59,10 +59,189 @@ TRADING_SESSIONS_UTC = {
 }
 
 
-st.set_page_config(page_title="AI Gold Trading Agent", layout="wide")
+st.set_page_config(page_title="AI Gold Trading Agent", page_icon=":chart_with_upwards_trend:", layout="wide")
 st_autorefresh(interval=60_000, key="refresh")
 
-st.title("AI Gold & Forex Trading Dashboard")
+st.markdown(
+    """
+    <style>
+    :root {
+        --bg: #f5f7fb;
+        --panel: #ffffff;
+        --panel-soft: #f8fafc;
+        --border: #d9e2ef;
+        --text: #172033;
+        --muted: #68758a;
+        --accent: #c89b3c;
+        --accent-soft: #fff6df;
+        --buy: #11845b;
+        --sell: #c24141;
+        --hold: #536179;
+    }
+
+    html, body, [data-testid="stAppViewContainer"] {
+        background: var(--bg);
+        color: var(--text);
+    }
+
+    .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 2rem;
+        max-width: 1320px;
+    }
+
+    [data-testid="stSidebar"] {
+        background: #eef3f9;
+        border-right: 1px solid var(--border);
+    }
+
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] label {
+        color: var(--text);
+    }
+
+    [data-testid="stSidebar"] [data-testid="stButton"] button {
+        border-radius: 6px;
+        border: 1px solid #b8c6d8;
+        background: #ffffff;
+        color: var(--text);
+        font-weight: 600;
+    }
+
+    .dashboard-hero {
+        padding: 1.2rem 1.35rem;
+        margin-bottom: 1rem;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: linear-gradient(135deg, #ffffff 0%, #f9fbff 58%, #fff7e6 100%);
+        box-shadow: 0 12px 28px rgba(21, 31, 52, 0.06);
+    }
+
+    .dashboard-kicker {
+        color: var(--accent);
+        font-size: 0.78rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin-bottom: 0.25rem;
+    }
+
+    .dashboard-title {
+        margin: 0;
+        font-size: 2.15rem;
+        line-height: 1.1;
+        font-weight: 800;
+        color: var(--text);
+    }
+
+    .dashboard-subtitle {
+        margin: 0.55rem 0 0;
+        color: var(--muted);
+        font-size: 0.98rem;
+        max-width: 760px;
+    }
+
+    .status-strip {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        margin-top: 0.9rem;
+    }
+
+    .status-chip {
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 0.28rem 0.65rem;
+        background: #ffffff;
+        color: var(--muted);
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .status-chip strong {
+        color: var(--text);
+    }
+
+    h3 {
+        color: var(--text);
+        font-weight: 800;
+        margin-top: 1.45rem;
+    }
+
+    div[data-testid="stMetric"] {
+        min-height: 108px;
+        padding: 0.95rem 1rem;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--panel);
+        box-shadow: 0 8px 18px rgba(21, 31, 52, 0.05);
+    }
+
+    div[data-testid="stMetricLabel"] p {
+        color: var(--muted);
+        font-size: 0.78rem;
+        font-weight: 700;
+        white-space: normal;
+    }
+
+    div[data-testid="stMetricValue"] {
+        color: var(--text);
+        font-size: 1.72rem;
+        font-weight: 800;
+        line-height: 1.12;
+        white-space: normal;
+        overflow-wrap: anywhere;
+    }
+
+    div[data-testid="stAlert"] {
+        border-radius: 8px;
+        border: 1px solid var(--border);
+    }
+
+    div[data-testid="stTable"],
+    div[data-testid="stDataFrame"] {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+        background: var(--panel);
+    }
+
+    .stPlotlyChart {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0.35rem;
+        background: var(--panel);
+        box-shadow: 0 8px 18px rgba(21, 31, 52, 0.04);
+    }
+
+    .small-note {
+        color: var(--muted);
+        font-size: 0.82rem;
+        margin-top: -0.35rem;
+        margin-bottom: 0.55rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+    <div class="dashboard-hero">
+        <div class="dashboard-kicker">Paper trading command center</div>
+        <h1 class="dashboard-title">AI Gold & Forex Trading Dashboard</h1>
+        <p class="dashboard-subtitle">
+            Signal quality, virtual execution, session performance, volume checks, and risk controls in one focused trading view.
+        </p>
+        <div class="status-strip">
+            <span class="status-chip">Mode: <strong>Virtual trading</strong></span>
+            <span class="status-chip">Refresh: <strong>60 seconds</strong></span>
+            <span class="status-chip">Risk: <strong>ATR based</strong></span>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 if "paper_session_id" not in st.session_state:
     st.session_state.paper_session_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -753,33 +932,38 @@ Time: {datetime.now()}
 """
     send_telegram_alert(message)
 
-col1, col2, col3, col4 = st.columns(4)
+col1, col2 = st.columns(2)
 col1.metric("Signal", signal)
 col2.metric("Trend", trend)
+col3, col4 = st.columns(2)
 col3.metric("Price", market_price)
 col4.metric("Confidence", f"{confidence}%")
 
-guard1, guard2, guard3, guard4 = st.columns(4)
+guard1, guard2 = st.columns(2)
 guard1.metric("Volume", f"{int(float(latest.get('Volume', 0))):,}" if volume_available else "N/A")
 guard2.metric("Volume Ratio", f"{float(latest.get('Volume_Ratio', 0)):.2f}x" if volume_available else "N/A")
+guard3, guard4 = st.columns(2)
 guard3.metric("Volume Status", volume_status)
 guard4.metric("News Guard", "BLOCKED" if news_blocked else "CLEAR")
 
-filter1, filter2, filter3, filter4 = st.columns(4)
+filter1, filter2 = st.columns(2)
 filter1.metric("Raw Signal", raw_signal)
 filter2.metric("ADX", round(float(latest.get("ADX", 0)), 2))
+filter3, filter4 = st.columns(2)
 filter3.metric("Session", "OPEN" if is_in_selected_session(latest.name) else "CLOSED")
 filter4.metric("Trade Filter", filter_status.upper())
 
-perf1, perf2, perf3, perf4 = st.columns(4)
+perf1, perf2 = st.columns(2)
 perf1.metric("Session Success", f"{session_performance['success_rate']}%")
 perf2.metric("Session Closed", session_performance["closed"])
+perf3, perf4 = st.columns(2)
 perf3.metric("Session Open", session_performance["open"])
 perf4.metric("Session Net", session_performance["net_points"])
 
-quality1, quality2, quality3, quality4 = st.columns(4)
+quality1, quality2 = st.columns(2)
 quality1.metric("Session Expectancy", session_performance["expectancy"])
 quality2.metric("Session Profit Factor", session_performance["profit_factor"])
+quality3, quality4 = st.columns(2)
 quality3.metric("Session Avg Win/Loss", f"{session_performance['avg_win']} / {session_performance['avg_loss']}")
 quality4.metric("Session Drawdown", session_performance["max_drawdown"])
 
@@ -1005,11 +1189,25 @@ fig.add_trace(
         low=df["Low"],
         close=df["Close"],
         name="Candles",
+        increasing_line_color="#11845b",
+        increasing_fillcolor="#d7f0e5",
+        decreasing_line_color="#c24141",
+        decreasing_fillcolor="#f7dada",
     )
 )
-fig.add_trace(go.Scatter(x=df.index, y=df["EMA20"], line=dict(width=1), name="EMA20"))
-fig.add_trace(go.Scatter(x=df.index, y=df["EMA50"], line=dict(width=1), name="EMA50"))
-fig.update_layout(height=700, xaxis_rangeslider_visible=False)
+fig.add_trace(go.Scatter(x=df.index, y=df["EMA20"], line=dict(width=1.5, color="#c89b3c"), name="EMA20"))
+fig.add_trace(go.Scatter(x=df.index, y=df["EMA50"], line=dict(width=1.5, color="#3b6ea8"), name="EMA50"))
+fig.update_layout(
+    height=700,
+    xaxis_rangeslider_visible=False,
+    template="plotly_white",
+    paper_bgcolor="#ffffff",
+    plot_bgcolor="#fbfcff",
+    margin=dict(l=16, r=16, t=28, b=16),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    xaxis=dict(gridcolor="#e7edf5"),
+    yaxis=dict(gridcolor="#e7edf5"),
+)
 st.plotly_chart(fig, width="stretch")
 
 st.subheader("Latest Market Snapshot")
