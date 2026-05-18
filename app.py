@@ -50,6 +50,13 @@ TRADE_COLUMNS = [
     "exit_reason",
 ]
 
+TRADING_SESSIONS_UTC = {
+    "All Sessions": None,
+    "London": (7, 16),
+    "New York": (12, 21),
+    "London/New York Overlap": (12, 16),
+}
+
 
 st.set_page_config(page_title="AI Gold Trading Agent", layout="wide")
 st_autorefresh(interval=60_000, key="refresh")
@@ -65,9 +72,17 @@ interval = st.sidebar.selectbox("Timeframe", ["5m", "15m", "1h"], index=1)
 period = st.sidebar.selectbox("Historical Period", ["7d", "30d", "60d"])
 risk_percent = st.sidebar.slider("Risk Per Trade (%)", 1, 5, 2)
 enable_paper_trading = st.sidebar.toggle("Auto Virtual Trading", value=True)
-trade_reference_levels = st.sidebar.toggle("Trade HOLD References", value=True)
+trade_reference_levels = st.sidebar.toggle("Trade HOLD References", value=False)
+min_adx = st.sidebar.slider("Minimum ADX", 10, 40, 20)
+trading_session = st.sidebar.selectbox(
+    "Trading Session",
+    list(TRADING_SESSIONS_UTC.keys()),
+    index=3,
+)
 require_volume_confirmation = st.sidebar.toggle("Require Volume Confirmation", value=False)
 volume_spike_threshold = st.sidebar.slider("Volume Spike Threshold", 1.0, 3.0, 1.2, 0.1)
+spread_points = st.sidebar.number_input("Spread Cost (points)", 0.0, 100.0, 0.20, 0.01)
+slippage_points = st.sidebar.number_input("Slippage Cost (points)", 0.0, 100.0, 0.10, 0.01)
 avoid_high_impact_news = st.sidebar.toggle("Avoid High Impact News", value=True)
 block_if_news_unavailable = st.sidebar.toggle("Block if News Unavailable", value=False)
 news_minutes_before = st.sidebar.slider("Minutes Before News", 15, 180, 60, 15)
@@ -105,6 +120,12 @@ def add_indicators(data: pd.DataFrame) -> pd.DataFrame:
         frame["High"].astype(float),
         frame["Low"].astype(float),
         close,
+    )
+    frame["ADX"] = ta.trend.adx(
+        frame["High"].astype(float),
+        frame["Low"].astype(float),
+        close,
+        window=14,
     )
 
     if "Volume" in frame.columns:
@@ -162,6 +183,15 @@ def calculate_trade_levels(entry_price: float, atr: float) -> dict[str, float]:
     }
 
 
+def calculate_execution_entry(direction: str, market_price: float) -> float:
+    cost = spread_points + slippage_points
+    if direction.startswith("BUY"):
+        return round(market_price + cost, 2)
+    if direction.startswith("SELL"):
+        return round(market_price - cost, 2)
+    return round(market_price, 2)
+
+
 def suggested_direction(signal: str, trend: str) -> str:
     if signal in {"BUY", "SELL"}:
         return signal
@@ -193,6 +223,42 @@ def calculate_volume_status(latest: pd.Series) -> tuple[str, bool]:
     if ratio >= volume_spike_threshold:
         return "Confirmed", True
     return "Low", False
+
+
+def is_in_selected_session(timestamp: object) -> bool:
+    session = TRADING_SESSIONS_UTC[trading_session]
+    if session is None:
+        return True
+
+    hour = pd.Timestamp(timestamp).tz_convert("UTC").hour
+    start_hour, end_hour = session
+    return start_hour <= hour < end_hour
+
+
+def apply_strategy_filters(
+    raw_signal: str,
+    latest_row: pd.Series,
+    volume_is_confirmed: bool,
+) -> tuple[str, list[str]]:
+    reasons = []
+
+    if raw_signal not in {"BUY", "SELL"}:
+        return raw_signal, reasons
+
+    adx_value = float(latest_row.get("ADX", 0))
+    if adx_value < min_adx:
+        reasons.append(f"ADX below {min_adx}")
+
+    if not is_in_selected_session(latest_row.name):
+        reasons.append(f"outside {trading_session}")
+
+    if require_volume_confirmation and not volume_is_confirmed:
+        reasons.append("volume not confirmed")
+
+    if reasons:
+        return "HOLD", reasons
+
+    return raw_signal, reasons
 
 
 def date_range_for_calendar() -> tuple[str, str]:
@@ -402,7 +468,9 @@ def open_virtual_trade(
     )
 
     if not enable_paper_trading or not should_trade:
-        return trades, False, "Virtual trading is off or no trade setup is available."
+        if not enable_paper_trading:
+            return trades, False, "Virtual trading is off."
+        return trades, False, "No BUY/SELL setup is available."
 
     if trade_blocked:
         return trades, False, block_reason
@@ -449,6 +517,11 @@ def calculate_performance(trades: pd.DataFrame) -> dict[str, float | int]:
             "losses": 0,
             "success_rate": 0.0,
             "net_points": 0.0,
+            "avg_win": 0.0,
+            "avg_loss": 0.0,
+            "profit_factor": 0.0,
+            "expectancy": 0.0,
+            "max_drawdown": 0.0,
         }
 
     filtered = trades[(trades["symbol"] == symbol) & (trades["interval"] == interval)]
@@ -457,6 +530,16 @@ def calculate_performance(trades: pd.DataFrame) -> dict[str, float | int]:
     losses = int((closed["result"] == "LOSS").sum())
     closed_count = int(len(closed))
     pnl = pd.to_numeric(closed["pnl_points"], errors="coerce").fillna(0)
+    winning_pnl = pnl[pnl > 0]
+    losing_pnl = pnl[pnl < 0]
+    avg_win = float(winning_pnl.mean()) if not winning_pnl.empty else 0.0
+    avg_loss = abs(float(losing_pnl.mean())) if not losing_pnl.empty else 0.0
+    gross_profit = float(winning_pnl.sum()) if not winning_pnl.empty else 0.0
+    gross_loss = abs(float(losing_pnl.sum())) if not losing_pnl.empty else 0.0
+    win_rate = wins / closed_count if closed_count else 0
+    loss_rate = losses / closed_count if closed_count else 0
+    equity = pnl.cumsum()
+    drawdown = equity.cummax() - equity
 
     return {
         "total": int(len(filtered)),
@@ -464,8 +547,82 @@ def calculate_performance(trades: pd.DataFrame) -> dict[str, float | int]:
         "open": int((filtered["status"] == "OPEN").sum()),
         "wins": wins,
         "losses": losses,
-        "success_rate": round((wins / closed_count) * 100, 2) if closed_count else 0.0,
+        "success_rate": round(win_rate * 100, 2) if closed_count else 0.0,
         "net_points": round(float(pnl.sum()), 2),
+        "avg_win": round(avg_win, 2),
+        "avg_loss": round(avg_loss, 2),
+        "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss else 0.0,
+        "expectancy": round((win_rate * avg_win) - (loss_rate * avg_loss), 2),
+        "max_drawdown": round(float(drawdown.max()), 2) if not drawdown.empty else 0.0,
+    }
+
+
+def backtest_strategy(data: pd.DataFrame) -> dict[str, float | int]:
+    closed_results = []
+
+    for row_number in range(51, len(data) - 1):
+        test_slice = data.iloc[: row_number + 1]
+        current = data.iloc[row_number]
+        raw_signal, _ = calculate_signal(test_slice)
+        volume_status_value, volume_ok = calculate_volume_status(current)
+        filtered_signal, filter_reasons = apply_strategy_filters(raw_signal, current, volume_ok)
+
+        if filtered_signal not in {"BUY", "SELL"} or filter_reasons:
+            continue
+
+        market_entry = round(float(current["Close"]), 2)
+        execution_entry = calculate_execution_entry(filtered_signal, market_entry)
+        test_levels = calculate_trade_levels(execution_entry, float(current["ATR"]))
+        stop = test_levels["buy_stop_loss"] if filtered_signal == "BUY" else test_levels["sell_stop_loss"]
+        target = test_levels["buy_take_profit"] if filtered_signal == "BUY" else test_levels["sell_take_profit"]
+
+        for _, future_candle in data.iloc[row_number + 1 :].iterrows():
+            high = float(future_candle["High"])
+            low = float(future_candle["Low"])
+
+            if filtered_signal == "BUY":
+                if low <= stop:
+                    closed_results.append(stop - execution_entry)
+                    break
+                if high >= target:
+                    closed_results.append(target - execution_entry)
+                    break
+            else:
+                if high >= stop:
+                    closed_results.append(execution_entry - stop)
+                    break
+                if low <= target:
+                    closed_results.append(execution_entry - target)
+                    break
+
+    if not closed_results:
+        return {
+            "trades": 0,
+            "win_rate": 0.0,
+            "net_points": 0.0,
+            "profit_factor": 0.0,
+            "expectancy": 0.0,
+            "max_drawdown": 0.0,
+        }
+
+    pnl = pd.Series(closed_results)
+    wins = pnl[pnl > 0]
+    losses = pnl[pnl < 0]
+    win_rate = len(wins) / len(pnl)
+    gross_profit = float(wins.sum()) if not wins.empty else 0.0
+    gross_loss = abs(float(losses.sum())) if not losses.empty else 0.0
+    avg_win = float(wins.mean()) if not wins.empty else 0.0
+    avg_loss = abs(float(losses.mean())) if not losses.empty else 0.0
+    equity = pnl.cumsum()
+    drawdown = equity.cummax() - equity
+
+    return {
+        "trades": int(len(pnl)),
+        "win_rate": round(win_rate * 100, 2),
+        "net_points": round(float(pnl.sum()), 2),
+        "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss else 0.0,
+        "expectancy": round((win_rate * avg_win) - ((1 - win_rate) * avg_loss), 2),
+        "max_drawdown": round(float(drawdown.max()), 2),
     }
 
 
@@ -480,14 +637,17 @@ if len(df) < 2:
     st.stop()
 
 latest = df.iloc[-1]
-signal, trend = calculate_signal(df)
-entry_price = round(float(latest["Close"]), 2)
+raw_signal, trend = calculate_signal(df)
+market_price = round(float(latest["Close"]), 2)
 atr = float(latest["ATR"])
-levels = calculate_trade_levels(entry_price, atr)
-direction = suggested_direction(signal, trend)
 volume_available = has_volume_data(df)
 volume_status, volume_confirmed = calculate_volume_status(latest)
+signal, filter_reasons = apply_strategy_filters(raw_signal, latest, volume_confirmed)
+direction = suggested_direction(signal, trend)
 volume_blocked = require_volume_confirmation and not volume_confirmed
+strategy_blocked = bool(filter_reasons)
+entry_price = calculate_execution_entry(direction, market_price)
+levels = calculate_trade_levels(entry_price, atr)
 
 if direction.startswith("BUY"):
     stop_loss = levels["buy_stop_loss"]
@@ -515,13 +675,20 @@ news_calendar, news_status = fetch_economic_calendar(
     te_credentials,
 )
 news_blocked, news_reason, high_impact_events = calculate_news_guard(news_calendar, news_status)
-trade_blocked = news_blocked or volume_blocked
+trade_blocked = news_blocked or strategy_blocked
 trade_block_reason = (
     f"News guard active: {news_reason}"
     if news_blocked
-    else f"Volume filter active: {volume_status}"
-    if volume_blocked
+    else f"Strategy filter active: {', '.join(filter_reasons)}"
+    if strategy_blocked
     else "Clear to trade"
+)
+filter_status = (
+    "No Setup"
+    if raw_signal not in {"BUY", "SELL"}
+    else "Blocked"
+    if strategy_blocked
+    else "Pass"
 )
 
 trade_log = load_trade_log()
@@ -560,7 +727,7 @@ Time: {datetime.now()}
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Signal", signal)
 col2.metric("Trend", trend)
-col3.metric("Price", entry_price)
+col3.metric("Price", market_price)
 col4.metric("Confidence", f"{confidence}%")
 
 guard1, guard2, guard3, guard4 = st.columns(4)
@@ -569,11 +736,23 @@ guard2.metric("Volume Ratio", f"{float(latest.get('Volume_Ratio', 0)):.2f}x" if 
 guard3.metric("Volume Status", volume_status)
 guard4.metric("News Guard", "BLOCKED" if news_blocked else "CLEAR")
 
+filter1, filter2, filter3, filter4 = st.columns(4)
+filter1.metric("Raw Signal", raw_signal)
+filter2.metric("ADX", round(float(latest.get("ADX", 0)), 2))
+filter3.metric("Session", "OPEN" if is_in_selected_session(latest.name) else "CLOSED")
+filter4.metric("Trade Filter", filter_status.upper())
+
 perf1, perf2, perf3, perf4 = st.columns(4)
 perf1.metric("Success Rate", f"{performance['success_rate']}%")
 perf2.metric("Closed Trades", performance["closed"])
 perf3.metric("Open Trades", performance["open"])
 perf4.metric("Net Points", performance["net_points"])
+
+quality1, quality2, quality3, quality4 = st.columns(4)
+quality1.metric("Expectancy", performance["expectancy"])
+quality2.metric("Profit Factor", performance["profit_factor"])
+quality3.metric("Avg Win/Loss", f"{performance['avg_win']} / {performance['avg_loss']}")
+quality4.metric("Max Drawdown", performance["max_drawdown"])
 
 if trade_opened:
     st.success(f"New virtual {normalize_trade_direction(direction)} trade opened for this candle.")
@@ -589,12 +768,18 @@ trade_df = pd.DataFrame(
     {
         "Parameter": [
             "Setup Type",
+            "Raw Signal",
+            "Filter",
             "Direction",
-            "Entry",
+            "Market Price",
+            "Execution Entry",
             "Stop Loss",
             "Take Profit",
             "Risk %",
             "Risk Reward",
+            "ADX",
+            "Session",
+            "Costs",
             "Volume Status",
             "News Guard",
             "BUY SL",
@@ -604,12 +789,18 @@ trade_df = pd.DataFrame(
         ],
         "Value": [
             "Active Signal" if signal != "HOLD" else "Reference Levels",
+            raw_signal,
+            filter_status if not filter_reasons else ", ".join(filter_reasons),
             direction,
+            str(market_price),
             str(entry_price),
             str(stop_loss),
             str(take_profit),
             f"{risk_percent}%",
             "1:2",
+            str(round(float(latest.get("ADX", 0)), 2)),
+            "Open" if is_in_selected_session(latest.name) else "Closed",
+            f"{spread_points + slippage_points:.2f}",
             volume_status,
             "Blocked" if news_blocked else "Clear",
             str(levels["buy_stop_loss"]),
@@ -642,7 +833,20 @@ if not high_impact_events.empty:
 st.subheader("Virtual Trading Performance")
 performance_df = pd.DataFrame(
     {
-        "Metric": ["Total Trades", "Closed", "Open", "Wins", "Losses", "Success Rate", "Net Points"],
+        "Metric": [
+            "Total Trades",
+            "Closed",
+            "Open",
+            "Wins",
+            "Losses",
+            "Success Rate",
+            "Net Points",
+            "Expectancy",
+            "Profit Factor",
+            "Avg Win",
+            "Avg Loss",
+            "Max Drawdown",
+        ],
         "Value": [
             str(performance["total"]),
             str(performance["closed"]),
@@ -651,10 +855,32 @@ performance_df = pd.DataFrame(
             str(performance["losses"]),
             f"{performance['success_rate']}%",
             str(performance["net_points"]),
+            str(performance["expectancy"]),
+            str(performance["profit_factor"]),
+            str(performance["avg_win"]),
+            str(performance["avg_loss"]),
+            str(performance["max_drawdown"]),
         ],
     }
 )
 st.table(performance_df)
+
+st.subheader("Historical Strategy Test")
+backtest = backtest_strategy(df)
+backtest_df = pd.DataFrame(
+    {
+        "Metric": ["Trades", "Win Rate", "Net Points", "Profit Factor", "Expectancy", "Max Drawdown"],
+        "Value": [
+            str(backtest["trades"]),
+            f"{backtest['win_rate']}%",
+            str(backtest["net_points"]),
+            str(backtest["profit_factor"]),
+            str(backtest["expectancy"]),
+            str(backtest["max_drawdown"]),
+        ],
+    }
+)
+st.table(backtest_df)
 
 recent_trades = trade_log[
     (trade_log["symbol"] == symbol) & (trade_log["interval"] == interval)
@@ -685,13 +911,14 @@ if not recent_trades.empty:
 st.subheader("Technical Indicators")
 indicator_df = pd.DataFrame(
     {
-        "Indicator": ["EMA20", "EMA50", "RSI", "MACD", "ATR", "Volume", "Avg Volume", "Volume Ratio"],
+        "Indicator": ["EMA20", "EMA50", "RSI", "MACD", "ATR", "ADX", "Volume", "Avg Volume", "Volume Ratio"],
         "Value": [
             round(float(latest["EMA20"]), 2),
             round(float(latest["EMA50"]), 2),
             round(float(latest["RSI"]), 2),
             round(float(latest["MACD"]), 2),
             round(float(latest["ATR"]), 2),
+            round(float(latest.get("ADX", 0)), 2),
             int(float(latest.get("Volume", 0))),
             round(float(latest.get("Volume_SMA20", 0)), 2),
             round(float(latest.get("Volume_Ratio", 0)), 2),
@@ -718,7 +945,7 @@ fig.update_layout(height=700, xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, width="stretch")
 
 st.subheader("Latest Market Snapshot")
-snapshot = df.tail(10)[["Close", "Volume", "Volume_Ratio", "EMA20", "EMA50", "RSI", "MACD"]]
+snapshot = df.tail(10)[["Close", "Volume", "Volume_Ratio", "EMA20", "EMA50", "RSI", "MACD", "ADX"]]
 st.dataframe(snapshot)
 
 st.markdown("---")

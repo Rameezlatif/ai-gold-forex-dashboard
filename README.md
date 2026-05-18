@@ -11,6 +11,11 @@ Streamlit dashboard for educational gold and forex signal testing. It fetches ma
 - Success rate, open trades, closed trades, and net points tracking
 - Volume confirmation and volume spike tracking
 - High-impact economic-news guard for paper trades
+- ADX trend-strength filter
+- London/New York trading-session filter
+- Spread and slippage simulation
+- Expectancy, profit factor, average win/loss, and drawdown metrics
+- Historical strategy test on the loaded candle data
 - Recent virtual trade history
 - Optional Telegram alert hook
 
