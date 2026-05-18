@@ -9,6 +9,8 @@ Streamlit dashboard for educational gold and forex signal testing. It fetches ma
 - Entry, stop loss, and take profit levels
 - Automatic virtual paper trading
 - Success rate, open trades, closed trades, and net points tracking
+- Volume confirmation and volume spike tracking
+- High-impact economic-news guard for paper trades
 - Recent virtual trade history
 - Optional Telegram alert hook
 
@@ -33,3 +35,12 @@ http://localhost:8501
 ## Notes
 
 This project is for educational and paper-trading use only. It does not place real broker trades.
+
+For the economic-news guard, add Trading Economics credentials in Streamlit secrets or environment variables:
+
+```toml
+TRADING_ECONOMICS_CLIENT = "your_client"
+TRADING_ECONOMICS_KEY = "your_key"
+```
+
+If no credentials are configured, the app can block virtual trades when `Block if News Unavailable` is enabled.

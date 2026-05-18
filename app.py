@@ -1,5 +1,6 @@
 import hashlib
-from datetime import datetime
+import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,12 @@ ASSETS = {
     "Gold (XAU/USD)": "GC=F",
     "EUR/USD": "EURUSD=X",
     "GBP/USD": "GBPUSD=X",
+}
+
+ASSET_NEWS_COUNTRIES = {
+    "Gold (XAU/USD)": ["united states"],
+    "EUR/USD": ["united states", "euro area", "germany", "france"],
+    "GBP/USD": ["united states", "united kingdom"],
 }
 
 ENABLE_TELEGRAM = False
@@ -59,6 +66,12 @@ period = st.sidebar.selectbox("Historical Period", ["7d", "30d", "60d"])
 risk_percent = st.sidebar.slider("Risk Per Trade (%)", 1, 5, 2)
 enable_paper_trading = st.sidebar.toggle("Auto Virtual Trading", value=True)
 trade_reference_levels = st.sidebar.toggle("Trade HOLD References", value=True)
+require_volume_confirmation = st.sidebar.toggle("Require Volume Confirmation", value=False)
+volume_spike_threshold = st.sidebar.slider("Volume Spike Threshold", 1.0, 3.0, 1.2, 0.1)
+avoid_high_impact_news = st.sidebar.toggle("Avoid High Impact News", value=True)
+block_if_news_unavailable = st.sidebar.toggle("Block if News Unavailable", value=True)
+news_minutes_before = st.sidebar.slider("Minutes Before News", 15, 180, 60, 15)
+news_minutes_after = st.sidebar.slider("Minutes After News", 15, 180, 30, 15)
 
 
 @st.cache_data(ttl=60)
@@ -93,6 +106,19 @@ def add_indicators(data: pd.DataFrame) -> pd.DataFrame:
         frame["Low"].astype(float),
         close,
     )
+
+    if "Volume" in frame.columns:
+        frame["Volume"] = pd.to_numeric(frame["Volume"], errors="coerce").fillna(0)
+        frame["Volume_SMA20"] = frame["Volume"].rolling(window=20).mean()
+        frame["Volume_Ratio"] = np.where(
+            frame["Volume_SMA20"] > 0,
+            frame["Volume"] / frame["Volume_SMA20"],
+            0,
+        )
+    else:
+        frame["Volume"] = 0
+        frame["Volume_SMA20"] = 0
+        frame["Volume_Ratio"] = 0
 
     return frame.dropna()
 
@@ -151,6 +177,114 @@ def calculate_confidence(signal: str, trend: str, latest: pd.Series) -> int:
     seed = int(hashlib.sha256(seed_source.encode()).hexdigest()[:8], 16)
     rng = np.random.default_rng(seed)
     return int(rng.integers(70, 95))
+
+
+def has_volume_data(data: pd.DataFrame) -> bool:
+    return "Volume" in data.columns and pd.to_numeric(data["Volume"], errors="coerce").fillna(0).sum() > 0
+
+
+def calculate_volume_status(latest: pd.Series) -> tuple[str, bool]:
+    volume = float(latest.get("Volume", 0))
+    average_volume = float(latest.get("Volume_SMA20", 0))
+    ratio = float(latest.get("Volume_Ratio", 0))
+
+    if volume <= 0 or average_volume <= 0:
+        return "Unavailable", False
+    if ratio >= volume_spike_threshold:
+        return "Confirmed", True
+    return "Low", False
+
+
+def date_range_for_calendar() -> tuple[str, str]:
+    now = datetime.now(timezone.utc)
+    start = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    end = (now + timedelta(days=3)).strftime("%Y-%m-%d")
+    return start, end
+
+
+def get_trading_economics_credentials() -> str:
+    secret_client = ""
+    secret_key = ""
+
+    try:
+        secret_client = st.secrets.get("TRADING_ECONOMICS_CLIENT", "")
+        secret_key = st.secrets.get("TRADING_ECONOMICS_KEY", "")
+    except Exception:
+        pass
+
+    client = os.getenv("TRADING_ECONOMICS_CLIENT", secret_client)
+    key = os.getenv("TRADING_ECONOMICS_KEY", secret_key)
+
+    if client and key:
+        return f"{client}:{key}"
+
+    return "guest:guest"
+
+
+@st.cache_data(ttl=900)
+def fetch_economic_calendar(
+    countries: tuple[str, ...],
+    start: str,
+    end: str,
+    credentials: str,
+) -> tuple[pd.DataFrame, str]:
+    if not countries:
+        return pd.DataFrame(), "No countries selected"
+
+    country_path = ",".join(country.replace(" ", "%20") for country in countries)
+    url = f"https://api.tradingeconomics.com/calendar/country/{country_path}/{start}/{end}"
+    params = {"c": credentials}
+
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        events = response.json()
+    except Exception as exc:
+        if credentials == "guest:guest":
+            return pd.DataFrame(), "Calendar unavailable. Add Trading Economics API credentials or turn off 'Block if News Unavailable'."
+        return pd.DataFrame(), f"Calendar unavailable: {exc}"
+
+    if not isinstance(events, list) or not events:
+        return pd.DataFrame(), "No events found"
+
+    calendar = pd.DataFrame(events)
+    if "Date" not in calendar.columns:
+        return pd.DataFrame(), "Calendar response missing event dates"
+
+    calendar["Date"] = pd.to_datetime(calendar["Date"], errors="coerce", utc=True)
+    calendar["Importance"] = pd.to_numeric(calendar.get("Importance", 0), errors="coerce").fillna(0)
+    calendar = calendar.dropna(subset=["Date"])
+    calendar = calendar.sort_values("Date")
+
+    return calendar, "Loaded"
+
+
+def calculate_news_guard(calendar: pd.DataFrame, status: str) -> tuple[bool, str, pd.DataFrame]:
+    if not avoid_high_impact_news:
+        return False, "News guard off", pd.DataFrame()
+
+    if calendar.empty:
+        return block_if_news_unavailable, status, pd.DataFrame()
+
+    now = datetime.now(timezone.utc)
+    high_impact = calendar[calendar["Importance"] >= 3].copy()
+    if high_impact.empty:
+        return False, "No high-impact news found", high_impact
+
+    window_start = now - timedelta(minutes=news_minutes_after)
+    window_end = now + timedelta(minutes=news_minutes_before)
+    active_events = high_impact[
+        (high_impact["Date"] >= window_start) & (high_impact["Date"] <= window_end)
+    ]
+
+    if active_events.empty:
+        return False, "Clear", high_impact
+
+    next_event = active_events.iloc[0]
+    event_name = next_event.get("Event", "High-impact news")
+    country = next_event.get("Country", "")
+    event_time = next_event["Date"].strftime("%Y-%m-%d %H:%M UTC")
+    return True, f"{country} {event_name} at {event_time}", high_impact
 
 
 def send_telegram_alert(message: str) -> None:
@@ -259,18 +393,23 @@ def open_virtual_trade(
     trade_signal: str,
     trade_direction: str,
     current_time: object,
-) -> tuple[pd.DataFrame, bool]:
+    trade_blocked: bool,
+    block_reason: str,
+) -> tuple[pd.DataFrame, bool, str]:
     normalized_direction = normalize_trade_direction(trade_direction)
     should_trade = trade_signal in {"BUY", "SELL"} or (
         trade_reference_levels and normalized_direction in {"BUY", "SELL"}
     )
 
     if not enable_paper_trading or not should_trade:
-        return trades, False
+        return trades, False, "Virtual trading is off or no trade setup is available."
+
+    if trade_blocked:
+        return trades, False, block_reason
 
     trade_id = build_trade_id(symbol, interval, current_time, normalized_direction)
     if not trades.empty and trade_id in set(trades["trade_id"].astype(str)):
-        return trades, False
+        return trades, False, "No duplicate trade opened for the current candle."
 
     new_trade = pd.DataFrame(
         [
@@ -297,7 +436,7 @@ def open_virtual_trade(
         ]
     )
 
-    return pd.concat([trades, new_trade], ignore_index=True), True
+    return pd.concat([trades, new_trade], ignore_index=True), True, "Trade opened."
 
 
 def calculate_performance(trades: pd.DataFrame) -> dict[str, float | int]:
@@ -346,6 +485,9 @@ entry_price = round(float(latest["Close"]), 2)
 atr = float(latest["ATR"])
 levels = calculate_trade_levels(entry_price, atr)
 direction = suggested_direction(signal, trend)
+volume_available = has_volume_data(df)
+volume_status, volume_confirmed = calculate_volume_status(latest)
+volume_blocked = require_volume_confirmation and not volume_confirmed
 
 if direction.startswith("BUY"):
     stop_loss = levels["buy_stop_loss"]
@@ -358,10 +500,40 @@ else:
     take_profit = levels["buy_take_profit"]
 
 confidence = calculate_confidence(signal, trend, latest)
+if volume_confirmed:
+    confidence = min(confidence + 3, 99)
+elif require_volume_confirmation:
+    confidence = max(confidence - 8, 0)
+
+calendar_start, calendar_end = date_range_for_calendar()
+calendar_countries = tuple(ASSET_NEWS_COUNTRIES.get(asset_label, ["united states"]))
+te_credentials = get_trading_economics_credentials()
+news_calendar, news_status = fetch_economic_calendar(
+    calendar_countries,
+    calendar_start,
+    calendar_end,
+    te_credentials,
+)
+news_blocked, news_reason, high_impact_events = calculate_news_guard(news_calendar, news_status)
+trade_blocked = news_blocked or volume_blocked
+trade_block_reason = (
+    f"News guard active: {news_reason}"
+    if news_blocked
+    else f"Volume filter active: {volume_status}"
+    if volume_blocked
+    else "Clear to trade"
+)
 
 trade_log = load_trade_log()
 trade_log = update_open_trades(trade_log, df)
-trade_log, trade_opened = open_virtual_trade(trade_log, signal, direction, latest.name)
+trade_log, trade_opened, trade_message = open_virtual_trade(
+    trade_log,
+    signal,
+    direction,
+    latest.name,
+    trade_blocked,
+    trade_block_reason,
+)
 save_trade_log(trade_log)
 performance = calculate_performance(trade_log)
 
@@ -391,6 +563,12 @@ col2.metric("Trend", trend)
 col3.metric("Price", entry_price)
 col4.metric("Confidence", f"{confidence}%")
 
+guard1, guard2, guard3, guard4 = st.columns(4)
+guard1.metric("Volume", f"{int(float(latest.get('Volume', 0))):,}" if volume_available else "N/A")
+guard2.metric("Volume Ratio", f"{float(latest.get('Volume_Ratio', 0)):.2f}x" if volume_available else "N/A")
+guard3.metric("Volume Status", volume_status)
+guard4.metric("News Guard", "BLOCKED" if news_blocked else "CLEAR")
+
 perf1, perf2, perf3, perf4 = st.columns(4)
 perf1.metric("Success Rate", f"{performance['success_rate']}%")
 perf2.metric("Closed Trades", performance["closed"])
@@ -399,8 +577,10 @@ perf4.metric("Net Points", performance["net_points"])
 
 if trade_opened:
     st.success(f"New virtual {normalize_trade_direction(direction)} trade opened for this candle.")
+elif trade_blocked:
+    st.error(f"Virtual trade blocked. {trade_message}")
 elif enable_paper_trading:
-    st.info("Virtual trading is active. No duplicate trade was opened for the current candle.")
+    st.info(f"Virtual trading is active. {trade_message}")
 else:
     st.warning("Virtual trading is turned off.")
 
@@ -415,6 +595,8 @@ trade_df = pd.DataFrame(
             "Take Profit",
             "Risk %",
             "Risk Reward",
+            "Volume Status",
+            "News Guard",
             "BUY SL",
             "BUY TP",
             "SELL SL",
@@ -428,6 +610,8 @@ trade_df = pd.DataFrame(
             str(take_profit),
             f"{risk_percent}%",
             "1:2",
+            volume_status,
+            "Blocked" if news_blocked else "Clear",
             str(levels["buy_stop_loss"]),
             str(levels["buy_take_profit"]),
             str(levels["sell_stop_loss"]),
@@ -436,6 +620,24 @@ trade_df = pd.DataFrame(
     }
 )
 st.table(trade_df)
+
+st.subheader("News Guard")
+if news_blocked:
+    st.error(f"No virtual trades while news guard is active: {news_reason}")
+else:
+    st.success(f"News guard clear: {news_reason}")
+
+if not high_impact_events.empty:
+    upcoming_news = high_impact_events[high_impact_events["Date"] >= datetime.now(timezone.utc)].head(10)
+    if not upcoming_news.empty:
+        news_display = upcoming_news.copy()
+        news_display["Date"] = news_display["Date"].dt.strftime("%Y-%m-%d %H:%M UTC")
+        visible_columns = [
+            column
+            for column in ["Date", "Country", "Event", "Importance", "Actual", "Forecast", "Previous"]
+            if column in news_display.columns
+        ]
+        st.dataframe(news_display[visible_columns].astype(str), width="stretch")
 
 st.subheader("Virtual Trading Performance")
 performance_df = pd.DataFrame(
@@ -483,13 +685,16 @@ if not recent_trades.empty:
 st.subheader("Technical Indicators")
 indicator_df = pd.DataFrame(
     {
-        "Indicator": ["EMA20", "EMA50", "RSI", "MACD", "ATR"],
+        "Indicator": ["EMA20", "EMA50", "RSI", "MACD", "ATR", "Volume", "Avg Volume", "Volume Ratio"],
         "Value": [
             round(float(latest["EMA20"]), 2),
             round(float(latest["EMA50"]), 2),
             round(float(latest["RSI"]), 2),
             round(float(latest["MACD"]), 2),
             round(float(latest["ATR"]), 2),
+            int(float(latest.get("Volume", 0))),
+            round(float(latest.get("Volume_SMA20", 0)), 2),
+            round(float(latest.get("Volume_Ratio", 0)), 2),
         ],
     }
 )
@@ -513,7 +718,7 @@ fig.update_layout(height=700, xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, width="stretch")
 
 st.subheader("Latest Market Snapshot")
-snapshot = df.tail(10)[["Close", "EMA20", "EMA50", "RSI", "MACD"]]
+snapshot = df.tail(10)[["Close", "Volume", "Volume_Ratio", "EMA20", "EMA50", "RSI", "MACD"]]
 st.dataframe(snapshot)
 
 st.markdown("---")
