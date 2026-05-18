@@ -37,6 +37,18 @@ Then open:
 http://localhost:8501
 ```
 
+## Windows Desktop-Style Launch
+
+On Windows, double-click:
+
+```text
+run_windows_app.bat
+```
+
+The launcher installs requirements if needed, starts Streamlit, and opens the app at `http://localhost:8501`.
+
+For a true installable desktop app (`.exe` or installer), wrap this project with PyInstaller, Electron, or Tauri on a Windows machine. The Streamlit app can be packaged, but the build should be done on Windows.
+
 ## Notes
 
 This project is for educational and paper-trading use only. It does not place real broker trades.

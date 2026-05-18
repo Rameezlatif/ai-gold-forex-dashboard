@@ -31,6 +31,7 @@ CHAT_ID = "YOUR_CHAT_ID"
 TRADE_LOG_PATH = Path(__file__).with_name("virtual_trades.csv")
 TRADE_COLUMNS = [
     "trade_id",
+    "session_id",
     "symbol",
     "asset",
     "interval",
@@ -63,6 +64,9 @@ st_autorefresh(interval=60_000, key="refresh")
 
 st.title("AI Gold & Forex Trading Dashboard")
 
+if "paper_session_id" not in st.session_state:
+    st.session_state.paper_session_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
 st.sidebar.header("Settings")
 
 asset_label = st.sidebar.selectbox("Select Asset", list(ASSETS.keys()))
@@ -87,6 +91,12 @@ avoid_high_impact_news = st.sidebar.toggle("Avoid High Impact News", value=True)
 block_if_news_unavailable = st.sidebar.toggle("Block if News Unavailable", value=False)
 news_minutes_before = st.sidebar.slider("Minutes Before News", 15, 180, 60, 15)
 news_minutes_after = st.sidebar.slider("Minutes After News", 15, 180, 30, 15)
+
+st.sidebar.header("Session")
+st.sidebar.caption(f"Current: {st.session_state.paper_session_id}")
+if st.sidebar.button("Start New Session", use_container_width=True):
+    st.session_state.paper_session_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    st.rerun()
 
 
 @st.cache_data(ttl=60)
@@ -375,6 +385,13 @@ def save_trade_log(trades: pd.DataFrame) -> None:
     trades.to_csv(TRADE_LOG_PATH, index=False)
 
 
+def clear_session_trades(trades: pd.DataFrame, session_id: str) -> pd.DataFrame:
+    if trades.empty or "session_id" not in trades.columns:
+        return trades
+
+    return trades[trades["session_id"].astype(str) != session_id].copy()
+
+
 def normalize_trade_direction(direction: str) -> str:
     if direction.startswith("BUY"):
         return "BUY"
@@ -384,7 +401,10 @@ def normalize_trade_direction(direction: str) -> str:
 
 
 def build_trade_id(ticker: str, timeframe: str, candle_time: object, trade_direction: str) -> str:
-    return f"{ticker}|{timeframe}|{pd.Timestamp(candle_time).isoformat()}|{trade_direction}"
+    return (
+        f"{st.session_state.paper_session_id}|"
+        f"{ticker}|{timeframe}|{pd.Timestamp(candle_time).isoformat()}|{trade_direction}"
+    )
 
 
 def update_open_trades(trades: pd.DataFrame, market_data: pd.DataFrame) -> pd.DataFrame:
@@ -483,6 +503,7 @@ def open_virtual_trade(
         [
             {
                 "trade_id": trade_id,
+                "session_id": st.session_state.paper_session_id,
                 "symbol": symbol,
                 "asset": asset_label,
                 "interval": interval,
@@ -507,7 +528,7 @@ def open_virtual_trade(
     return pd.concat([trades, new_trade], ignore_index=True), True, "Trade opened."
 
 
-def calculate_performance(trades: pd.DataFrame) -> dict[str, float | int]:
+def calculate_performance(trades: pd.DataFrame, session_id: str | None = None) -> dict[str, float | int]:
     if trades.empty:
         return {
             "total": 0,
@@ -525,6 +546,8 @@ def calculate_performance(trades: pd.DataFrame) -> dict[str, float | int]:
         }
 
     filtered = trades[(trades["symbol"] == symbol) & (trades["interval"] == interval)]
+    if session_id is not None and "session_id" in filtered.columns:
+        filtered = filtered[filtered["session_id"].astype(str) == session_id]
     closed = filtered[filtered["status"] == "CLOSED"]
     wins = int((closed["result"] == "WIN").sum())
     losses = int((closed["result"] == "LOSS").sum())
@@ -692,6 +715,11 @@ filter_status = (
 )
 
 trade_log = load_trade_log()
+if st.sidebar.button("Clear Current Session Trades", use_container_width=True):
+    trade_log = clear_session_trades(trade_log, st.session_state.paper_session_id)
+    save_trade_log(trade_log)
+    st.rerun()
+
 trade_log = update_open_trades(trade_log, df)
 trade_log, trade_opened, trade_message = open_virtual_trade(
     trade_log,
@@ -702,7 +730,8 @@ trade_log, trade_opened, trade_message = open_virtual_trade(
     trade_block_reason,
 )
 save_trade_log(trade_log)
-performance = calculate_performance(trade_log)
+session_performance = calculate_performance(trade_log, st.session_state.paper_session_id)
+all_time_performance = calculate_performance(trade_log)
 
 if ENABLE_TELEGRAM and signal != "HOLD":
     message = f"""
@@ -743,16 +772,16 @@ filter3.metric("Session", "OPEN" if is_in_selected_session(latest.name) else "CL
 filter4.metric("Trade Filter", filter_status.upper())
 
 perf1, perf2, perf3, perf4 = st.columns(4)
-perf1.metric("Success Rate", f"{performance['success_rate']}%")
-perf2.metric("Closed Trades", performance["closed"])
-perf3.metric("Open Trades", performance["open"])
-perf4.metric("Net Points", performance["net_points"])
+perf1.metric("Session Success", f"{session_performance['success_rate']}%")
+perf2.metric("Session Closed", session_performance["closed"])
+perf3.metric("Session Open", session_performance["open"])
+perf4.metric("Session Net", session_performance["net_points"])
 
 quality1, quality2, quality3, quality4 = st.columns(4)
-quality1.metric("Expectancy", performance["expectancy"])
-quality2.metric("Profit Factor", performance["profit_factor"])
-quality3.metric("Avg Win/Loss", f"{performance['avg_win']} / {performance['avg_loss']}")
-quality4.metric("Max Drawdown", performance["max_drawdown"])
+quality1.metric("Session Expectancy", session_performance["expectancy"])
+quality2.metric("Session Profit Factor", session_performance["profit_factor"])
+quality3.metric("Session Avg Win/Loss", f"{session_performance['avg_win']} / {session_performance['avg_loss']}")
+quality4.metric("Session Drawdown", session_performance["max_drawdown"])
 
 if trade_opened:
     st.success(f"New virtual {normalize_trade_direction(direction)} trade opened for this candle.")
@@ -830,8 +859,9 @@ if not high_impact_events.empty:
         ]
         st.dataframe(news_display[visible_columns].astype(str), width="stretch")
 
-st.subheader("Virtual Trading Performance")
-performance_df = pd.DataFrame(
+st.subheader("Current Session Performance")
+st.caption(f"Session ID: {st.session_state.paper_session_id}")
+session_performance_df = pd.DataFrame(
     {
         "Metric": [
             "Total Trades",
@@ -848,22 +878,57 @@ performance_df = pd.DataFrame(
             "Max Drawdown",
         ],
         "Value": [
-            str(performance["total"]),
-            str(performance["closed"]),
-            str(performance["open"]),
-            str(performance["wins"]),
-            str(performance["losses"]),
-            f"{performance['success_rate']}%",
-            str(performance["net_points"]),
-            str(performance["expectancy"]),
-            str(performance["profit_factor"]),
-            str(performance["avg_win"]),
-            str(performance["avg_loss"]),
-            str(performance["max_drawdown"]),
+            str(session_performance["total"]),
+            str(session_performance["closed"]),
+            str(session_performance["open"]),
+            str(session_performance["wins"]),
+            str(session_performance["losses"]),
+            f"{session_performance['success_rate']}%",
+            str(session_performance["net_points"]),
+            str(session_performance["expectancy"]),
+            str(session_performance["profit_factor"]),
+            str(session_performance["avg_win"]),
+            str(session_performance["avg_loss"]),
+            str(session_performance["max_drawdown"]),
         ],
     }
 )
-st.table(performance_df)
+st.table(session_performance_df)
+
+with st.expander("All-Time Paper Trading Performance"):
+    all_time_performance_df = pd.DataFrame(
+        {
+            "Metric": [
+                "Total Trades",
+                "Closed",
+                "Open",
+                "Wins",
+                "Losses",
+                "Success Rate",
+                "Net Points",
+                "Expectancy",
+                "Profit Factor",
+                "Avg Win",
+                "Avg Loss",
+                "Max Drawdown",
+            ],
+            "Value": [
+                str(all_time_performance["total"]),
+                str(all_time_performance["closed"]),
+                str(all_time_performance["open"]),
+                str(all_time_performance["wins"]),
+                str(all_time_performance["losses"]),
+                f"{all_time_performance['success_rate']}%",
+                str(all_time_performance["net_points"]),
+                str(all_time_performance["expectancy"]),
+                str(all_time_performance["profit_factor"]),
+                str(all_time_performance["avg_win"]),
+                str(all_time_performance["avg_loss"]),
+                str(all_time_performance["max_drawdown"]),
+            ],
+        }
+    )
+    st.table(all_time_performance_df)
 
 st.subheader("Historical Strategy Test")
 backtest = backtest_strategy(df)
@@ -883,13 +948,16 @@ backtest_df = pd.DataFrame(
 st.table(backtest_df)
 
 recent_trades = trade_log[
-    (trade_log["symbol"] == symbol) & (trade_log["interval"] == interval)
+    (trade_log["symbol"] == symbol)
+    & (trade_log["interval"] == interval)
+    & (trade_log["session_id"].astype(str) == st.session_state.paper_session_id)
 ].tail(20)
 
 if not recent_trades.empty:
     recent_trade_display = recent_trades[
         [
             "entry_time",
+            "session_id",
             "signal",
             "direction",
             "entry_price",
