@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import pytz
 import requests
 import streamlit as st
 import ta
@@ -57,6 +58,19 @@ TRADING_SESSIONS_UTC = {
     "New York": (12, 21),
     "London/New York Overlap": (12, 16),
 }
+
+USER_TIMEZONES = [
+    "Asia/Karachi",
+    "Asia/Dubai",
+    "Asia/Kolkata",
+    "Asia/Singapore",
+    "Europe/London",
+    "Europe/Berlin",
+    "America/New_York",
+    "America/Chicago",
+    "America/Los_Angeles",
+    "UTC",
+]
 
 
 st.set_page_config(page_title="AI Gold Trading Agent", page_icon=":chart_with_upwards_trend:", layout="wide")
@@ -262,6 +276,12 @@ trading_session = st.sidebar.selectbox(
     list(TRADING_SESSIONS_UTC.keys()),
     index=3,
 )
+user_timezone_name = st.sidebar.selectbox(
+    "Your Timezone",
+    USER_TIMEZONES,
+    index=USER_TIMEZONES.index("Asia/Karachi"),
+)
+user_timezone = pytz.timezone(user_timezone_name)
 require_volume_confirmation = st.sidebar.toggle("Require Volume Confirmation", value=False)
 volume_spike_threshold = st.sidebar.slider("Volume Spike Threshold", 1.0, 3.0, 1.2, 0.1)
 spread_points = st.sidebar.number_input("Spread Cost (points)", 0.0, 100.0, 0.20, 0.01)
@@ -414,12 +434,36 @@ def calculate_volume_status(latest: pd.Series) -> tuple[str, bool]:
     return "Low", False
 
 
+def as_utc_timestamp(timestamp: object) -> pd.Timestamp:
+    converted = pd.Timestamp(timestamp)
+    if converted.tzinfo is None:
+        return converted.tz_localize("UTC")
+    return converted.tz_convert("UTC")
+
+
+def format_local_time(timestamp: object) -> str:
+    local_time = as_utc_timestamp(timestamp).tz_convert(user_timezone)
+    return local_time.strftime("%Y-%m-%d %H:%M %Z")
+
+
+def selected_session_local_window() -> str:
+    session = TRADING_SESSIONS_UTC[trading_session]
+    if session is None:
+        return "24 hours"
+
+    today_utc = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    start_hour, end_hour = session
+    start_time = today_utc.replace(hour=start_hour).astimezone(user_timezone)
+    end_time = today_utc.replace(hour=end_hour).astimezone(user_timezone)
+    return f"{start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')}"
+
+
 def is_in_selected_session(timestamp: object) -> bool:
     session = TRADING_SESSIONS_UTC[trading_session]
     if session is None:
         return True
 
-    hour = pd.Timestamp(timestamp).tz_convert("UTC").hour
+    hour = as_utc_timestamp(timestamp).hour
     start_hour, end_hour = session
     return start_hour <= hour < end_hour
 
@@ -953,6 +997,10 @@ filter3, filter4 = st.columns(2)
 filter3.metric("Session", "OPEN" if is_in_selected_session(latest.name) else "CLOSED")
 filter4.metric("Trade Filter", filter_status.upper())
 
+time1, time2 = st.columns(2)
+time1.metric("Your Time", format_local_time(datetime.now(timezone.utc)))
+time2.metric("Session Window", selected_session_local_window())
+
 perf1, perf2 = st.columns(2)
 perf1.metric("Session Success", f"{session_performance['success_rate']}%")
 perf2.metric("Session Closed", session_performance["closed"])
@@ -992,6 +1040,9 @@ trade_df = pd.DataFrame(
             "Risk Reward",
             "ADX",
             "Session",
+            "Timezone",
+            "Local Candle Time",
+            "Session Window",
             "Costs",
             "Volume Status",
             "News Guard",
@@ -1013,6 +1064,9 @@ trade_df = pd.DataFrame(
             "1:2",
             str(round(float(latest.get("ADX", 0)), 2)),
             "Open" if is_in_selected_session(latest.name) else "Closed",
+            user_timezone_name,
+            format_local_time(latest.name),
+            selected_session_local_window(),
             f"{spread_points + slippage_points:.2f}",
             volume_status,
             "Blocked" if news_blocked else "Clear",

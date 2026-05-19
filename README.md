@@ -13,6 +13,7 @@ Streamlit dashboard for educational gold and forex signal testing. It fetches ma
 - High-impact economic-news guard for paper trades
 - ADX trend-strength filter
 - London/New York trading-session filter
+- User timezone selector for local session timing
 - Spread and slippage simulation
 - Expectancy, profit factor, average win/loss, and drawdown metrics
 - Historical strategy test on the loaded candle data
