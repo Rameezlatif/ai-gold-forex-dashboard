@@ -7,6 +7,8 @@ Streamlit dashboard for educational gold and forex signal testing. It fetches ma
 - XAU/USD, EUR/USD, and GBP/USD market data
 - EMA20, EMA50, RSI, MACD, and ATR indicators
 - Entry, stop loss, and take profit levels
+- Clear BUY TP, BUY SL, SELL TP, and SELL SL assistant table
+- Explainable assistant notes for why a setup is BUY, SELL, or WAIT
 - Automatic virtual paper trading
 - Success rate, open trades, closed trades, and net points tracking
 - Volume confirmation and volume spike tracking
@@ -16,7 +18,6 @@ Streamlit dashboard for educational gold and forex signal testing. It fetches ma
 - User timezone selector for local session timing
 - Spread and slippage simulation
 - Expectancy, profit factor, average win/loss, and drawdown metrics
-- Historical strategy test on the loaded candle data
 - Recent virtual trade history
 - Optional Telegram alert hook
 

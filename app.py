@@ -234,6 +234,41 @@ st.markdown(
         margin-top: -0.35rem;
         margin-bottom: 0.55rem;
     }
+
+    .assistant-panel {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 1rem 1.1rem;
+        margin: 1rem 0;
+        box-shadow: 0 10px 22px rgba(21, 31, 52, 0.05);
+    }
+
+    .assistant-label {
+        color: var(--muted);
+        font-size: 0.78rem;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        margin-bottom: 0.35rem;
+    }
+
+    .assistant-decision {
+        font-size: 2rem;
+        line-height: 1.1;
+        font-weight: 850;
+        margin-bottom: 0.35rem;
+    }
+
+    .decision-buy { color: var(--buy); }
+    .decision-sell { color: var(--sell); }
+    .decision-wait { color: var(--hold); }
+
+    .assistant-note {
+        color: var(--muted);
+        font-size: 0.95rem;
+        margin-bottom: 0;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -242,10 +277,10 @@ st.markdown(
 st.markdown(
     """
     <div class="dashboard-hero">
-        <div class="dashboard-kicker">Paper trading command center</div>
+        <div class="dashboard-kicker">Trade assistant dashboard</div>
         <h1 class="dashboard-title">AI Gold & Forex Trading Dashboard</h1>
         <p class="dashboard-subtitle">
-            Signal quality, virtual execution, session performance, volume checks, and risk controls in one focused trading view.
+            Clear BUY/SELL reference levels, risk controls, and explainable signal notes to support your own analysis.
         </p>
         <div class="status-strip">
             <span class="status-chip">Mode: <strong>Virtual trading</strong></span>
@@ -266,7 +301,7 @@ asset_label = st.sidebar.selectbox("Select Asset", list(ASSETS.keys()))
 symbol = ASSETS[asset_label]
 
 interval = st.sidebar.selectbox("Timeframe", ["5m", "15m", "1h"], index=1)
-period = st.sidebar.selectbox("Historical Period", ["7d", "30d", "60d"])
+period = st.sidebar.selectbox("Indicator Data Window", ["7d", "30d", "60d"])
 risk_percent = st.sidebar.slider("Risk Per Trade (%)", 1, 5, 2)
 enable_paper_trading = st.sidebar.toggle("Auto Virtual Trading", value=True)
 trade_reference_levels = st.sidebar.toggle("Trade HOLD References", value=False)
@@ -872,6 +907,39 @@ def backtest_strategy(data: pd.DataFrame) -> dict[str, float | int]:
     }
 
 
+def assistant_decision(signal_value: str, blocked: bool) -> tuple[str, str, str]:
+    if blocked:
+        return "WAIT", "decision-wait", "A setup exists, but one or more safety filters blocked it."
+    if signal_value == "BUY":
+        return "BUY SETUP", "decision-buy", "The assistant sees a bullish setup. Confirm with your own chart analysis before entry."
+    if signal_value == "SELL":
+        return "SELL SETUP", "decision-sell", "The assistant sees a bearish setup. Confirm with your own chart analysis before entry."
+    return "WAIT", "decision-wait", "No active BUY or SELL setup is confirmed right now."
+
+
+def build_explanation_points() -> list[str]:
+    points = [
+        f"Trend is {trend} based on EMA20 versus EMA50.",
+        f"Raw signal is {raw_signal}; tradable signal is {signal}.",
+        f"ADX is {round(float(latest.get('ADX', 0)), 2)} with minimum filter set to {min_adx}.",
+        f"Session is {'open' if is_in_selected_session(latest.name) else 'closed'} for {trading_session}.",
+        f"Volume status is {volume_status} with ratio {float(latest.get('Volume_Ratio', 0)):.2f}x.",
+        f"News guard is {'blocked' if news_blocked else 'clear'}.",
+    ]
+
+    if filter_reasons:
+        points.append(f"Trade filter blocked the setup because: {', '.join(filter_reasons)}.")
+
+    if signal == "HOLD":
+        points.append("Assistant recommendation: wait; use BUY/SELL levels as reference only.")
+    elif signal == "BUY":
+        points.append("Assistant recommendation: only consider BUY if price action confirms your own bullish analysis.")
+    elif signal == "SELL":
+        points.append("Assistant recommendation: only consider SELL if price action confirms your own bearish analysis.")
+
+    return points
+
+
 try:
     df = add_indicators(fetch_data(symbol, interval, period))
 except Exception as exc:
@@ -894,6 +962,10 @@ volume_blocked = require_volume_confirmation and not volume_confirmed
 strategy_blocked = bool(filter_reasons)
 entry_price = calculate_execution_entry(direction, market_price)
 levels = calculate_trade_levels(entry_price, atr)
+buy_entry_price = calculate_execution_entry("BUY", market_price)
+sell_entry_price = calculate_execution_entry("SELL", market_price)
+buy_levels = calculate_trade_levels(buy_entry_price, atr)
+sell_levels = calculate_trade_levels(sell_entry_price, atr)
 
 if direction.startswith("BUY"):
     stop_loss = levels["buy_stop_loss"]
@@ -936,6 +1008,8 @@ filter_status = (
     if strategy_blocked
     else "Pass"
 )
+assistant_title, assistant_class, assistant_note = assistant_decision(signal, trade_blocked)
+explanation_points = build_explanation_points()
 
 trade_log = load_trade_log()
 if st.sidebar.button("Clear Current Session Trades", use_container_width=True):
@@ -1024,60 +1098,67 @@ elif enable_paper_trading:
 else:
     st.warning("Virtual trading is turned off.")
 
-st.subheader("Trade Setup")
-trade_df = pd.DataFrame(
+st.subheader("Trade Assistant")
+st.markdown(
+    f"""
+    <div class="assistant-panel">
+        <div class="assistant-label">Assistant view</div>
+        <div class="assistant-decision {assistant_class}">{assistant_title}</div>
+        <p class="assistant-note">{assistant_note}</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+levels_df = pd.DataFrame(
     {
-        "Parameter": [
-            "Setup Type",
-            "Raw Signal",
-            "Filter",
-            "Direction",
-            "Market Price",
-            "Execution Entry",
-            "Stop Loss",
-            "Take Profit",
-            "Risk %",
-            "Risk Reward",
-            "ADX",
-            "Session",
-            "Timezone",
-            "Local Candle Time",
-            "Session Window",
-            "Costs",
-            "Volume Status",
-            "News Guard",
-            "BUY SL",
-            "BUY TP",
-            "SELL SL",
-            "SELL TP",
-        ],
-        "Value": [
-            "Active Signal" if signal != "HOLD" else "Reference Levels",
-            raw_signal,
-            filter_status if not filter_reasons else ", ".join(filter_reasons),
-            direction,
-            str(market_price),
-            str(entry_price),
-            str(stop_loss),
-            str(take_profit),
-            f"{risk_percent}%",
-            "1:2",
-            str(round(float(latest.get("ADX", 0)), 2)),
-            "Open" if is_in_selected_session(latest.name) else "Closed",
-            user_timezone_name,
-            format_local_time(latest.name),
-            selected_session_local_window(),
-            f"{spread_points + slippage_points:.2f}",
-            volume_status,
-            "Blocked" if news_blocked else "Clear",
-            str(levels["buy_stop_loss"]),
-            str(levels["buy_take_profit"]),
-            str(levels["sell_stop_loss"]),
-            str(levels["sell_take_profit"]),
+        "Side": ["BUY", "SELL"],
+        "Entry Reference": [str(buy_entry_price), str(sell_entry_price)],
+        "Take Profit": [str(buy_levels["buy_take_profit"]), str(sell_levels["sell_take_profit"])],
+        "Stop Loss": [str(buy_levels["buy_stop_loss"]), str(sell_levels["sell_stop_loss"])],
+        "Use Case": [
+            "Use only if your analysis also supports a bullish trade.",
+            "Use only if your analysis also supports a bearish trade.",
         ],
     }
 )
-st.table(trade_df)
+st.table(levels_df)
+
+with st.expander("Why is the assistant suggesting this?"):
+    for point in explanation_points:
+        st.markdown(f"- {point}")
+
+context_df = pd.DataFrame(
+    {
+        "Item": [
+            "Market Price",
+            "Raw Signal",
+            "Tradable Signal",
+            "Filter",
+            "Trend",
+            "ADX",
+            "Session",
+            "Local Candle Time",
+            "Session Window",
+            "Risk",
+            "Costs",
+        ],
+        "Value": [
+            str(market_price),
+            raw_signal,
+            signal,
+            filter_status if not filter_reasons else ", ".join(filter_reasons),
+            trend,
+            str(round(float(latest.get("ADX", 0)), 2)),
+            "Open" if is_in_selected_session(latest.name) else "Closed",
+            format_local_time(latest.name),
+            selected_session_local_window(),
+            f"{risk_percent}%",
+            f"{spread_points + slippage_points:.2f}",
+        ],
+    }
+)
+st.table(context_df)
 
 st.subheader("News Guard")
 if news_blocked:
@@ -1168,23 +1249,6 @@ with st.expander("All-Time Paper Trading Performance"):
     )
     st.table(all_time_performance_df)
 
-st.subheader("Historical Strategy Test")
-backtest = backtest_strategy(df)
-backtest_df = pd.DataFrame(
-    {
-        "Metric": ["Trades", "Win Rate", "Net Points", "Profit Factor", "Expectancy", "Max Drawdown"],
-        "Value": [
-            str(backtest["trades"]),
-            f"{backtest['win_rate']}%",
-            str(backtest["net_points"]),
-            str(backtest["profit_factor"]),
-            str(backtest["expectancy"]),
-            str(backtest["max_drawdown"]),
-        ],
-    }
-)
-st.table(backtest_df)
-
 recent_trades = trade_log[
     (trade_log["symbol"] == symbol)
     & (trade_log["interval"] == interval)
@@ -1263,10 +1327,6 @@ fig.update_layout(
     yaxis=dict(gridcolor="#e7edf5"),
 )
 st.plotly_chart(fig, width="stretch")
-
-st.subheader("Latest Market Snapshot")
-snapshot = df.tail(10)[["Close", "Volume", "Volume_Ratio", "EMA20", "EMA50", "RSI", "MACD", "ADX"]]
-st.dataframe(snapshot)
 
 st.markdown("---")
 st.markdown(
